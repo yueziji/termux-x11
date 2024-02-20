@@ -13,6 +13,7 @@ import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 
 import androidx.annotation.IntDef;
 import androidx.core.math.MathUtils;
@@ -65,7 +66,7 @@ public class TouchInputHandler {
 
     /**
      * Distance in pixels beyond which a motion gesture is considered to be a swipe. This is
-     * initialized using the Context passed into the ctor.
+     * initialized using the Context passed into the constructor.
      */
     private final float mSwipeThreshold;
 
@@ -82,7 +83,7 @@ public class TouchInputHandler {
     private boolean mSwipeCompleted;
 
     /**
-     * Set to true when a 1 finger pan gesture originates with a longpress.  This means the user
+     * Set to true when a 1 finger pan gesture originates with a long-press.  This means the user
      * is performing a drag operation.
      */
     private boolean mIsDragging;
@@ -215,8 +216,8 @@ public class TouchInputHandler {
     }
 
     private void resetTransformation() {
-        float sx = (float) mRenderData.screenWidth / mRenderData.imageWidth;
-        float sy = (float) mRenderData.screenHeight / mRenderData.imageHeight;
+        float sx = (float) mRenderData.screenWidth / (float) mRenderData.imageWidth;
+        float sy = (float) mRenderData.screenHeight / (float) mRenderData.imageHeight;
         mRenderData.scale.set(sx, sy);
     }
 
@@ -224,12 +225,12 @@ public class TouchInputHandler {
         mRenderData.screenWidth = w;
         mRenderData.screenHeight = h;
 
-        resetTransformation();
-
         if (mTouchpadHandler != null)
             mTouchpadHandler.handleClientSizeChanged(w, h);
 
         moveCursorToScreenPoint((float) w / 2, (float) h / 2);
+
+        resetTransformation();
     }
 
     public void handleHostSizeChanged(int w, int h) {
@@ -238,10 +239,10 @@ public class TouchInputHandler {
 //        mPanGestureBounds = new Rect(mEdgeSlopInPx, mEdgeSlopInPx, w - mEdgeSlopInPx, h - mEdgeSlopInPx);
         moveCursorToScreenPoint((float) w/2, (float) h/2);
 
-        resetTransformation();
-
         if (mTouchpadHandler != null)
             mTouchpadHandler.handleHostSizeChanged(w, h);
+
+        resetTransformation();
     }
 
     public void setInputMode(@InputMode int inputMode) {
@@ -253,12 +254,20 @@ public class TouchInputHandler {
             mInputStrategy = new InputStrategyInterface.TrackpadInputStrategy(mInjector);
     }
 
+    public void setTapToMove(boolean enabled) {
+        mInjector.tapToMove = enabled;
+    }
+
     public void setPreferScancodes(boolean enabled) {
         mInjector.preferScancodes = enabled;
     }
 
     public void setPointerCaptureEnabled(boolean enabled) {
         mInjector.pointerCapture = enabled;
+    }
+
+    public void setApplyDisplayScaleFactorToTouchpad(boolean enabled) {
+        mInjector.scaleTouchpad = enabled;
     }
 
     private void moveCursorByOffset(float deltaX, float deltaY) {
@@ -300,6 +309,12 @@ public class TouchInputHandler {
      * @noinspection NullableProblems */
     private class GestureListener extends GestureDetector.SimpleOnGestureListener
             implements TapGestureDetector.OnTapListener {
+        private final Handler mGestureListenerHandler = new Handler(msg -> {
+            if (msg.what == InputStub.BUTTON_LEFT)
+                mInputStrategy.onTap(InputStub.BUTTON_LEFT);
+            return true;
+        });
+
         /**
          * Called when the user drags one or more fingers across the touchscreen.
          */
@@ -331,8 +346,13 @@ public class TouchInputHandler {
             if (pointerCount != 1 || mSuppressCursorMovement)
                 return false;
 
-            if (mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy)
+            if (mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) {
+                if (mInjector.scaleTouchpad) {
+                    distanceX *= mRenderData.scale.x;
+                    distanceY *= mRenderData.scale.y;
+                }
                 moveCursorByOffset(distanceX * mRenderData.scale.x, distanceY * mRenderData.scale.y);
+            }
             if (!(mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) && mIsDragging) {
                 // Ensure the cursor follows the user's finger when the user is dragging under
                 // direct input mode.
@@ -363,7 +383,35 @@ public class TouchInputHandler {
                 moveCursorToScreenPoint(x, y);
             }
 
-            mInputStrategy.onTap(button);
+            if (button != InputStub.BUTTON_LEFT || !(mInjector.tapToMove && mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy))
+                mInputStrategy.onTap(button);
+            else
+                mGestureListenerHandler.sendEmptyMessageDelayed(InputStub.BUTTON_LEFT, ViewConfiguration.getDoubleTapTimeout());
+        }
+
+
+        private float mLastFocusX;
+        private float mLastFocusY;
+        @Override
+        public boolean onDoubleTapEvent(MotionEvent e) {
+            if (e.getPointerCount() == 1) {
+                switch(e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        if (mInjector.tapToMove && mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) {
+                            mGestureListenerHandler.removeMessages(InputStub.BUTTON_LEFT);
+                            onLongPress(1, e.getX(), e.getY());
+                        }
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        onScroll(null, e, mLastFocusX - e.getX(), mLastFocusY - e.getY());
+                        break;
+                }
+
+                mLastFocusX = e.getX();
+                mLastFocusY = e.getY();
+            }
+
+            return true;
         }
 
         /** Called when a long-press is triggered for one or more fingers. */
@@ -449,7 +497,8 @@ public class TouchInputHandler {
                 if (e.getDevice().getMotionRange(MotionEvent.AXIS_RELATIVE_X) != null) {
                     float x = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X), y = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y);
                     mInjector.sendCursorMove(2 * x, 2 * y, true);
-                    mTouchpadHandler.mTapDetector.onTouchEvent(e);
+                    if (mTouchpadHandler != null)
+                        mTouchpadHandler.mTapDetector.onTouchEvent(e);
                 } else if ((e.getSource() & InputDevice.SOURCE_MOUSE_RELATIVE) == InputDevice.SOURCE_MOUSE_RELATIVE) {
                     mInjector.sendCursorMove(2 * e.getX(), 2 * e.getY(), true);
                 }

@@ -29,8 +29,10 @@ public final class InputEventSender {
 
     private final InputStub mInjector;
 
+    public boolean tapToMove = false;
     public boolean preferScancodes = false;
     public boolean pointerCapture = false;
+    public boolean scaleTouchpad = false;
 
     /** Set of pressed keys for which we've sent TextEvent. */
     private final TreeSet<Integer> mPressedTextKeys;

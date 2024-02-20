@@ -103,8 +103,12 @@ typedef struct {
         AHardwareBuffer* buffer;
         Bool locked;
         Bool legacyDrawing;
+        uint8_t flip;
         uint32_t width, height;
     } root;
+
+    JavaVM* vm;
+    JNIEnv* env;
 } lorieScreenInfo, *lorieScreenInfoPtr;
 
 ScreenPtr pScreenPtr;
@@ -195,6 +199,7 @@ ddxInputThreadInit(void) {}
 void ddxUseMsg(void) {
     ErrorF("-xstartup \"command\"    start `command` after server startup\n");
     ErrorF("-legacy-drawing        use legacy drawing, without using AHardwareBuffers\n");
+    ErrorF("-force-bgra            force flipping colours (RGBA->BGRA)\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -206,6 +211,11 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
 
     if (strcmp(argv[i], "-legacy-drawing") == 0) {
         pvfb->root.legacyDrawing = TRUE;
+        return 1;
+    }
+
+    if (strcmp(argv[i], "-force-bgra") == 0) {
+        pvfb->root.flip = TRUE;
         return 1;
     }
 
@@ -323,7 +333,9 @@ static void lorieUpdateBuffer(void) {
         d0.height = pScreenPtr->height;
         d0.layers = 1;
         d0.usage = USAGE;
-        d0.format = 5; // Stands to HAL_PIXEL_FORMAT_BGRA_8888
+        d0.format = pvfb->root.flip
+                ? AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM
+                : AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
 
         /* I could use this, but in this case I must swap colours in the shader. */
         // desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
@@ -342,7 +354,7 @@ static void lorieUpdateBuffer(void) {
 
         pScreenPtr->ModifyPixmapHeader(pScreenPtr->devPrivate, d0.width, d0.height, 32, 32, d0.stride * 4, data0);
 
-        renderer_set_buffer(new);
+        renderer_set_buffer(pvfb->env, new);
     }
 
     if (old) {
@@ -418,11 +430,11 @@ static void lorieTimerCallback(int fd, unused int r, void *arg) {
         ScreenPtr pScreen = (ScreenPtr) arg;
 
         loriePixmapUnlock(pScreen->GetScreenPixmap(pScreen));
-        redrawn = renderer_redraw();
+        redrawn = renderer_redraw(pvfb->env, pvfb->root.flip);
         if (loriePixmapLock(pScreen->GetScreenPixmap(pScreen)) && redrawn)
             DamageEmpty(pvfb->damage);
     } else if (pvfb->cursorMoved)
-        renderer_redraw();
+        renderer_redraw(pvfb->env, pvfb->root.flip);
 
     pvfb->cursorMoved = FALSE;
 }
@@ -656,13 +668,13 @@ CursorForDevice(DeviceIntPtr pDev) {
 }
 
 Bool lorieChangeWindow(unused ClientPtr pClient, void *closure) {
-    struct ANativeWindow* win = (struct ANativeWindow*) closure;
-    renderer_set_window(win, pvfb->root.buffer);
+    jobject surface = (jobject) closure;
+    renderer_set_window(pvfb->env, surface, pvfb->root.buffer);
     lorieSetCursor(NULL, NULL, CursorForDevice(GetMaster(lorieMouse, MASTER_POINTER)), -1, -1);
 
     if (pvfb->root.legacyDrawing) {
         renderer_update_root(pScreenPtr->width, pScreenPtr->height, ((PixmapPtr) pScreenPtr->devPrivate)->devPrivate.ptr);
-        renderer_redraw();
+        renderer_redraw(pvfb->env, pvfb->root.flip);
     }
 
     return TRUE;
@@ -714,13 +726,18 @@ InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     screen_info->bitmapBitOrder = BITMAP_BIT_ORDER;
     screen_info->numPixmapFormats = ARRAY_SIZE(depths);
 
-    renderer_init();
+    renderer_init(&pvfb->root.legacyDrawing, &pvfb->root.flip);
     xorgGlxCreateVendor();
     lorieInitSelectionCallback();
 
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
         FatalError("Couldn't add screen %d\n", i);
     }
+}
+
+void lorieSetVM(JavaVM* vm) {
+    pvfb->vm = vm;
+    (*vm)->AttachCurrentThread(vm, &pvfb->env, NULL);
 }
 
 static GLboolean drawableSwapBuffers(unused ClientPtr client, unused __GLXdrawable * drawable) { return TRUE; }
