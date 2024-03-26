@@ -186,15 +186,15 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         Context context = null;
         PrintStream err = System.err;
         try {
-            java.lang.reflect.Field f = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            Object unsafe = f.get(null);
             // Hiding harmless framework errors, like this:
             // java.io.FileNotFoundException: /data/system/theme_config/theme_compatibility.xml: open failed: ENOENT (No such file or directory)
             System.setErr(new PrintStream(new OutputStream() { public void write(int arg0) {} }));
             if (System.getenv("OLD_CONTEXT") != null) {
                 context = android.app.ActivityThread.systemMain().getSystemContext();
             } else {
+                java.lang.reflect.Field f = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+                f.setAccessible(true);
+                Object unsafe = f.get(null);
                 context = ((android.app.ActivityThread) Class.
                         forName("sun.misc.Unsafe").
                         getMethod("allocateInstance", Class.class).
